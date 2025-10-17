@@ -323,9 +323,9 @@ def model_eval_cmd(jsonl_path, model_in, cal_in, report_out, plots_out, scores_o
         ids_lab = [ids_all[i] for i, m in enumerate(mask) if m]
         with open(scores_out, "w", newline="") as fout:
             w = csv.writer(fout)
-            w.writerow(["id", "score", "buggy_post", "llr"])
-            for rid, s, bp, l in zip(ids_lab, proba, unsup["buggy_post"], unsup["llr"]):
-                w.writerow([rid, float(s), float(bp), float(l)])
+            w.writerow(["id", "label", "score", "buggy_post", "llr"])
+            for rid, yy, s, bp, l in zip(ids_lab, y, proba, unsup["buggy_post"], unsup["llr"]):
+                w.writerow([rid, int(yy), float(s), float(bp), float(l)])
         click.echo(f"Saved scores to {scores_out}")
 
 
