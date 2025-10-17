@@ -5,6 +5,28 @@ Lightweight toolkit to **extract features** from R1CS (Circom/snarkjs export JSO
 
 
 
+## High Level Model Description (Version 1)
+```mathematica
+R1CS JSON  ─┐
+            ├─► Structural features       ┐
+(seedbank & │                             ├─► Feature vector X ─► Standardize ─► PCA(d) ─► GMM(k=2)
+ originals) ┘  Probe-time features (rank) ┘                                      │            │
+                                                                                 │            ├─► {buggy_post, llr}
+                                                                                 └────────────┘
+                                      ┌──────────────────────────────────────────────────────────────┐
+                                      │  Calibrator (LogReg/Tree): uses {buggy_post, llr, PCA comps} │
+                                      └──────────────────────────────────────────────────────────────┘
+                                                                                   │
+                                                                                   └─► score = P(UC | features)
+                                                                                   │
+                                                                       thresholds (FPR≈1%, 5%)
+                                                                                   │
+                                                                                 decision
+
+```
+
+
+
 ## Quickstart
 
 
@@ -13,3 +35,5 @@ Lightweight toolkit to **extract features** from R1CS (Circom/snarkjs export JSO
 
 ```bash
 pip install -e .
+
+
