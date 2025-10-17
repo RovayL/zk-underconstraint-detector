@@ -241,6 +241,70 @@ def featurize_dir_cmd(r1cs_dir, jsonl_path, seed, trials, subset, freeze_const, 
             f.write(json.dumps(r) + "\n")
     click.echo(f"Wrote {len(rows)} rows to {jsonl_path}")
 
+# Modeling commands (unsupervised + calibration + eval) ---
+@cli.command("model-unsup")
+@click.option("--jsonl", "jsonl_path", required=True, help="Dataset JSONL from seed-dataset")
+@click.option("--model-out", default="models/pca_gmm.joblib", show_default=True)
+@click.option("--n-pca", default=6, show_default=True)
+@click.option("--seed", default=0, show_default=True)
+def model_unsup_cmd(jsonl_path, model_out, n_pca, seed):
+    """Fit PCA(d) -> GMM(k=2) on features (unsupervised)."""
+    from zkuc.model.pca_gmm import dataset_from_jsonl, fit_pca_gmm
+    import numpy as np
+    X, feat_names, _ = dataset_from_jsonl(jsonl_path)
+    model = fit_pca_gmm(X, feat_names, n_pca=n_pca, random_state=seed)
+    Path(model_out).parent.mkdir(parents=True, exist_ok=True)
+    model.save(model_out)
+    click.echo(f"Saved PCA+GMM to {model_out} (buggy_component={model.buggy_component}, n_pca={model.n_pca})")
+
+@cli.command("model-calibrate")
+@click.option("--jsonl", "jsonl_path", required=True, help="Dataset JSONL with labels (seeded pairs)")
+@click.option("--model-in", default="models/pca_gmm.joblib", show_default=True)
+@click.option("--cal-out", default="models/calibrator.joblib", show_default=True)
+@click.option("--n-pca-feat", default=3, show_default=True)
+@click.option("--model-type", type=click.Choice(["logreg","tree"]), default="logreg", show_default=True)
+def model_calibrate_cmd(jsonl_path, model_in, cal_out, n_pca_feat, model_type):
+    """Fit lightweight calibrator (LogReg or small Tree) on unsupervised outputs + PCA comps."""
+    import numpy as np
+    from zkuc.model.pca_gmm import dataset_from_jsonl, PCAGMMModel
+    from zkuc.model.calibrate import fit_calibrator
+    X, feat_names, y_list = dataset_from_jsonl(jsonl_path)
+    y = np.array([yy for yy in y_list if yy is not None], dtype=int)
+    # keep only rows with labels
+    mask = np.array([yy is not None for yy in y_list])
+    X = X[mask]
+    model = PCAGMMModel.load(model_in)
+    cal = fit_calibrator(model, X, y, n_pca_used=n_pca_feat, model_type=model_type)
+    Path(cal_out).parent.mkdir(parents=True, exist_ok=True)
+    cal.save(cal_out)
+    click.echo(f"Saved calibrator to {cal_out} (thr@1%={cal.threshold_fpr_1pct:.4f}, thr@5%={cal.threshold_fpr_5pct:.4f})")
+
+@cli.command("model-eval")
+@click.option("--jsonl", "jsonl_path", required=True, help="Dataset JSONL (labels required for metrics)")
+@click.option("--model-in", default="models/pca_gmm.joblib", show_default=True)
+@click.option("--cal-in", default="models/calibrator.joblib", show_default=True)
+@click.option("--report-out", default="reports/m4_eval.json", show_default=True)
+def model_eval_cmd(jsonl_path, model_in, cal_in, report_out):
+    """Evaluate AUROC/PR, TPR at 1% and 5% FP, and a calibration curve; write JSON report."""
+    import json
+    import numpy as np
+    from zkuc.model.pca_gmm import dataset_from_jsonl, PCAGMMModel
+    from zkuc.model.calibrate import Calibrator
+    from zkuc.metrics.eval import evaluate_scores
+
+    X, feat_names, y_list = dataset_from_jsonl(jsonl_path)
+    mask = np.array([yy is not None for yy in y_list])
+    X, y = X[mask], np.array([yy for yy in y_list if yy is not None], dtype=int)
+
+    pga = PCAGMMModel.load(model_in)
+    cal = Calibrator.load(cal_in)
+    scores = cal.predict_proba(pga, X)
+
+    report = evaluate_scores(y, scores)
+    Path(report_out).parent.mkdir(parents=True, exist_ok=True)
+    with open(report_out, "w") as f:
+        json.dump(report, f, indent=2)
+    click.echo(json.dumps(report, indent=2))
 
 
 def main():

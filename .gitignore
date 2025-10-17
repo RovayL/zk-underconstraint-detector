@@ -9,3 +9,5 @@ build/
 data/
 *~
 
+# To avoid including compiled circom circuits in the repo
+*node_modules/
