@@ -1,0 +1,26 @@
+[project]
+name = "zkuc"
+version = "0.1.0"
+description = "Detecting under-constrained ZK circuits: R1CS feature extraction and (later) ML."
+authors = [{name = "Yavor Litchev"}]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.9",
+  "pandas>=1.5",
+  "click>=8.1",
+]
+
+[project.scripts]
+zkuc = "zkuc.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
