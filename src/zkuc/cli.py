@@ -172,6 +172,76 @@ def probe_cmd(r1cs, witness_files, witness_dir, trials, subset, seed,
         Path(out_path).write_text(s)
     print(s)
 
+# Dataset seeding and featurization ---
+@cli.command("seed-dataset")
+@click.option("--src-glob", required=True, help="Glob for source R1CS JSONs (originals)")
+@click.option("--out-dir", required=True, help="Directory to write seeded R1CS JSONs")
+@click.option("--per-src", default=4, show_default=True, help="Number of seeds per source per bucket (UC and control)")
+@click.option("--seed", default=0, show_default=True)
+@click.option("--jsonl", "jsonl_path", default="data/dataset.jsonl", show_default=True)
+@click.option("--trials", default=10, show_default=True)
+@click.option("--subset", default=32, show_default=True)
+@click.option("--freeze-const/--no-freeze-const", default=True, show_default=True)
+@click.option("--freeze-pub-inputs/--no-freeze-pub-inputs", default=True, show_default=True)
+def seed_dataset_cmd(src_glob, out_dir, per_src, seed, jsonl_path, trials, subset, freeze_const, freeze_pub_inputs):
+    """
+    Generate UC/control seeds from originals and write a dataset JSONL with features + ground-truth labels.
+    """
+    import glob, random, json
+    from zkuc.dataset.build import seed_from_file, SeedSpec
+
+    rng = random.Random(seed)
+    probe_cfg = dict(trials=int(trials), subset=int(subset),
+                     freeze_const=bool(freeze_const), freeze_pub_inputs=bool(freeze_pub_inputs), seed=int(seed))
+
+    # Define mutation recipes (feel free to tweak)
+    uc_specs = [
+        [SeedSpec("zero_cols", {"frac":0.05}, 1)],
+        [SeedSpec("linearize_mult_rows", {"frac":0.2}, 1)],
+        [SeedSpec("drop_rows", {"frac":0.10}, 1)],
+        [SeedSpec("zero_cols", {"frac":0.02}, 1), SeedSpec("linearize_mult_rows", {"frac":0.1}, 1)],
+    ]
+    ctrl_specs = [
+        [SeedSpec("duplicate_rows", {"frac":0.05}, 0)],
+        [SeedSpec("permute_rows", {}, 0)],
+        [SeedSpec("duplicate_rows", {"frac":0.03}, 0), SeedSpec("permute_rows", {}, 0)],
+    ]
+
+    Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+    for src in sorted(glob.glob(src_glob)):
+        seed_from_file(src, out_dir, per_src, rng, uc_specs, ctrl_specs, probe_cfg, jsonl_path)
+
+    click.echo(f"Seeded dataset written to {jsonl_path} and R1CS files under {out_dir}")
+
+@cli.command("featurize-dir")
+@click.option("--r1cs-dir", required=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--jsonl", "jsonl_path", required=True)
+@click.option("--seed", default=0, show_default=True)
+@click.option("--trials", default=10, show_default=True)
+@click.option("--subset", default=32, show_default=True)
+@click.option("--freeze-const/--no-freeze-const", default=True, show_default=True)
+@click.option("--freeze-pub-inputs/--no-freeze-pub-inputs", default=True, show_default=True)
+def featurize_dir_cmd(r1cs_dir, jsonl_path, seed, trials, subset, freeze_const, freeze_pub_inputs):
+    """
+    Featurize every *.r1cs.json in a directory and append rows to a JSONL (no ground-truth labels).
+    """
+    import random, json
+    from pathlib import Path
+    from zkuc.dataset.featurize import featurize_file
+    rng = random.Random(seed)
+    probe_cfg = dict(trials=int(trials), subset=int(subset),
+                     freeze_const=bool(freeze_const), freeze_pub_inputs=bool(freeze_pub_inputs), seed=int(seed))
+    rows = []
+    for fp in sorted(Path(r1cs_dir).glob("*.r1cs.json")):
+        feats = featurize_file(str(fp), rng, probe_cfg)
+        rows.append({"id": fp.name, "parent_id": None, "label_uc": None, "mutations": [], "features": feats, "probe_cfg": probe_cfg})
+    Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(jsonl_path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    click.echo(f"Wrote {len(rows)} rows to {jsonl_path}")
+
+
 
 def main():
     cli()
