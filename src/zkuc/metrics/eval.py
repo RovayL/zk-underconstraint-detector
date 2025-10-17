@@ -3,6 +3,8 @@ from typing import Dict, Any, Tuple, Callable
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
 from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 def tpr_at_fpr(y_true: np.ndarray, y_score: np.ndarray, target_fpr: float) -> float:
     fpr, tpr, thr = roc_curve(y_true, y_score)
@@ -38,3 +40,43 @@ def evaluate_scores(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, Any]:
         "tpr_at_fpr_5pct": float(tpr5),
         "calibration_curve": {"prob_true": prob_true.tolist(), "prob_pred": prob_pred.tolist()},
     }
+
+def save_plots(y_true: np.ndarray, y_score: np.ndarray, out_dir: str):
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    # ROC
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    plt.figure()
+    plt.plot(fpr, tpr, label="ROC")
+    plt.plot([0,1],[0,1], linestyle="--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out / "roc.png", dpi=150)
+    plt.close()
+    # PR
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+    prec, rec, _ = precision_recall_curve(y_true, y_score)
+    ap = average_precision_score(y_true, y_score)
+    plt.figure()
+    plt.plot(rec, prec, label=f"PR (AP={ap:.3f})")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Precision-Recall Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out / "pr.png", dpi=150)
+    plt.close()
+    # Calibration
+    prob_true, prob_pred = calibration_curve(y_true, y_score, n_bins=10, strategy="quantile")
+    plt.figure()
+    plt.plot(prob_pred, prob_true, marker="o", label="Calibration")
+    plt.plot([0,1],[0,1], linestyle="--")
+    plt.xlabel("Predicted probability")
+    plt.ylabel("Empirical probability")
+    plt.title("Calibration Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out / "calibration.png", dpi=150)
+    plt.close()

@@ -3,6 +3,7 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 from joblib import dump, load
+import io
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import roc_curve
@@ -29,7 +30,8 @@ class Calibrator:
 
     def predict_proba(self, pga: PCAGMMModel, X: np.ndarray) -> np.ndarray:
         # reconstruct classifier and features
-        obj = load(bytes(self.clf_bytes))
+        # load classifier from in-memory bytes
+        obj = load(io.BytesIO(self.clf_bytes))
         Z = pga.transform(X)
         scores = pga.score(X)
         # build supervised feature vector: [buggy_post, llr, Z[:,:n]]
@@ -45,10 +47,16 @@ class Calibrator:
             return obj.predict(F).astype(float)
 
 def _choose_threshold_at_fpr(y_true: np.ndarray, y_score: np.ndarray, target_fpr: float) -> float:
-    fpr, tpr, thresh = roc_curve(y_true, y_score)
-    # pick lowest threshold achieving <= target_fpr (or closest)
-    idx = np.argmin(np.maximum(fpr - target_fpr, 0.0) + 1e-9*(np.arange(len(fpr))))
-    return float(thresh[idx])
+    """
+    Robust threshold at target FPR using negative-score quantile:
+      P(score >= thr | y=0) ~= target_fpr  => thr = Quantile_{1-target_fpr}(neg_scores)
+    """
+    neg_scores = y_score[(np.asarray(y_true) == 0)]
+    if neg_scores.size == 0:
+        return float("inf")
+    q = 1.0 - float(target_fpr)
+    q = min(max(q, 0.0), 1.0)
+    return float(np.quantile(neg_scores, q))
 
 def fit_calibrator(
     pga: PCAGMMModel,

@@ -284,13 +284,17 @@ def model_calibrate_cmd(jsonl_path, model_in, cal_out, n_pca_feat, model_type):
 @click.option("--model-in", default="models/pca_gmm.joblib", show_default=True)
 @click.option("--cal-in", default="models/calibrator.joblib", show_default=True)
 @click.option("--report-out", default="reports/m4_eval.json", show_default=True)
-def model_eval_cmd(jsonl_path, model_in, cal_in, report_out):
+@click.option("--plots-out", default=None, help="Directory to write ROC/PR/Calibration plots (PNGs)")
+@click.option("--scores-out", default=None, help="CSV path to write per-row scores (id,score,buggy_post,llr) for labeled rows")
+def model_eval_cmd(jsonl_path, model_in, cal_in, report_out, plots_out, scores_out):
     """Evaluate AUROC/PR, TPR at 1% and 5% FP, and a calibration curve; write JSON report."""
     import json
     import numpy as np
     from zkuc.model.pca_gmm import dataset_from_jsonl, PCAGMMModel
     from zkuc.model.calibrate import Calibrator
-    from zkuc.metrics.eval import evaluate_scores
+    from zkuc.metrics.eval import evaluate_scores, save_plots
+    import csv
+    import json
 
     X, feat_names, y_list = dataset_from_jsonl(jsonl_path)
     mask = np.array([yy is not None for yy in y_list])
@@ -298,13 +302,31 @@ def model_eval_cmd(jsonl_path, model_in, cal_in, report_out):
 
     pga = PCAGMMModel.load(model_in)
     cal = Calibrator.load(cal_in)
-    scores = cal.predict_proba(pga, X)
-
-    report = evaluate_scores(y, scores)
+    proba = cal.predict_proba(pga, X)           # calibrated UC probability
+    unsup = pga.score(X)                        # {'buggy_post','llr',...}
+    report = evaluate_scores(y, proba)
     Path(report_out).parent.mkdir(parents=True, exist_ok=True)
     with open(report_out, "w") as f:
         json.dump(report, f, indent=2)
     click.echo(json.dumps(report, indent=2))
+    if plots_out:
+        save_plots(y, proba, plots_out)
+        click.echo(f"Saved plots to {plots_out}")
+    if scores_out:
+        Path(scores_out).parent.mkdir(parents=True, exist_ok=True)
+        # recover the IDs in the same order as dataset_from_jsonl()
+        ids_all = []
+        with open(jsonl_path, "r") as fin:
+            for line in fin:
+                if line.strip():
+                    ids_all.append(json.loads(line).get("id"))
+        ids_lab = [ids_all[i] for i, m in enumerate(mask) if m]
+        with open(scores_out, "w", newline="") as fout:
+            w = csv.writer(fout)
+            w.writerow(["id", "score", "buggy_post", "llr"])
+            for rid, s, bp, l in zip(ids_lab, proba, unsup["buggy_post"], unsup["llr"]):
+                w.writerow([rid, float(s), float(bp), float(l)])
+        click.echo(f"Saved scores to {scores_out}")
 
 
 def main():
