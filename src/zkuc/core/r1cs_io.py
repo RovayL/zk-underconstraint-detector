@@ -25,21 +25,39 @@ class R1CS:
     prime: int
     raw_constraints: Any
 
-def _parse_term(t: Dict[str, Any]) -> Term:
-    coeff = int(t.get("coeff", 0))
-    var = int(t.get("var", 0))
-    return Term(coeff=coeff, var=var)
-
 def _normalize_constraint_entry(entry) -> List[Term]:
-    out = []
-    for t in entry:
-        if isinstance(t, dict):
-            out.append(_parse_term(t))
-        elif isinstance(t, list) and len(t) == 2:
-            out.append(Term(int(t[0]), int(t[1])))
-        else:
-            raise ValueError(f"Unrecognized term format: {t}")
-    return out
+    """
+    Accepts:
+      • snarkjs/circom dict form: {"var_index_str": "coeff_str", ...}
+      • list of {"coeff": "...", "var": ...}
+      • list of [coeff, var]
+      • empty dict/list/None
+    Returns: List[Term]
+    """
+    if entry is None:
+        return []
+
+    # snarkjs dict form
+    if isinstance(entry, dict):
+        out = []
+        for sig, coeff in entry.items():
+            out.append(Term(int(coeff), int(sig)))
+        return out
+
+    # list forms
+    if isinstance(entry, list):
+        out = []
+        for t in entry:
+            if isinstance(t, dict) and "coeff" in t and "var" in t:
+                out.append(Term(int(t["coeff"]), int(t["var"])))
+            elif isinstance(t, (list, tuple)) and len(t) == 2:
+                c, v = t
+                out.append(Term(int(c), int(v)))
+            else:
+                raise ValueError(f"Unrecognized term format element: {t!r}")
+        return out
+
+    raise ValueError(f"Unrecognized term container: {type(entry)}")
 
 def _constraints_from_json(obj) -> List[Tuple[List[Term], List[Term], List[Term]]]:
     cons = obj.get("constraints")
@@ -61,10 +79,10 @@ def _constraints_from_json(obj) -> List[Tuple[List[Term], List[Term], List[Term]
     return out
 
 def _nz_mod_p(coeff: int, p: int) -> int:
-    # 1 if non-zero modulo p, else 0 (works for negative coeffs too)
     return 1 if (coeff % p) != 0 else 0
 
-def _build_sparse(constraints, n_rows, n_cols):
+# Change signature to accept p
+def _build_sparse(constraints, n_rows, n_cols, p: int):
     import numpy as np
     from scipy.sparse import csr_matrix
 
@@ -72,12 +90,8 @@ def _build_sparse(constraints, n_rows, n_cols):
     data, rows, cols = [], [], []
     for i, (A_terms, B_terms, C_terms) in enumerate(constraints):
         for t in A_terms:
-            if t.var < n_cols:
-                v = _nz_mod_p(t.coeff, BN254_PRIME)
-                if v:  # only store nonzeros
-                    data.append(1)
-                    rows.append(i)
-                    cols.append(t.var)
+            if t.var < n_cols and _nz_mod_p(t.coeff, p):
+                data.append(1); rows.append(i); cols.append(t.var)
     A = csr_matrix((np.array(data, dtype=np.int64),
                     (np.array(rows), np.array(cols))),
                    shape=(n_rows, n_cols))
@@ -86,12 +100,8 @@ def _build_sparse(constraints, n_rows, n_cols):
     data, rows, cols = [], [], []
     for i, (A_terms, B_terms, C_terms) in enumerate(constraints):
         for t in B_terms:
-            if t.var < n_cols:
-                v = _nz_mod_p(t.coeff, BN254_PRIME)
-                if v:
-                    data.append(1)
-                    rows.append(i)
-                    cols.append(t.var)
+            if t.var < n_cols and _nz_mod_p(t.coeff, p):
+                data.append(1); rows.append(i); cols.append(t.var)
     B = csr_matrix((np.array(data, dtype=np.int64),
                     (np.array(rows), np.array(cols))),
                    shape=(n_rows, n_cols))
@@ -100,25 +110,25 @@ def _build_sparse(constraints, n_rows, n_cols):
     data, rows, cols = [], [], []
     for i, (A_terms, B_terms, C_terms) in enumerate(constraints):
         for t in C_terms:
-            if t.var < n_cols:
-                v = _nz_mod_p(t.coeff, BN254_PRIME)
-                if v:
-                    data.append(1)
-                    rows.append(i)
-                    cols.append(t.var)
+            if t.var < n_cols and _nz_mod_p(t.coeff, p):
+                data.append(1); rows.append(i); cols.append(t.var)
     C = csr_matrix((np.array(data, dtype=np.int64),
                     (np.array(rows), np.array(cols))),
                    shape=(n_rows, n_cols))
 
     return A, B, C
 
-
 def load_r1cs_json(path: str | Path) -> R1CS:
     obj = json.loads(Path(path).read_text())
     n_constraints = int(obj.get("nConstraints") or obj.get("constraintsLen") or len(obj.get("constraints", [])))
     n_vars = int(obj.get("nVars") or obj.get("nWitness") or obj.get("variables", 0))
-    n_inputs = int(obj.get("nInputs") or obj.get("publicInputs", 0))
-    n_outputs = int(obj.get("nOutputs") or obj.get("publicOutputs", 0))
+
+    # Be liberal with field names:
+    n_inputs = obj.get("nInputs", obj.get("nPubInputs", 0))
+    n_inputs = int(n_inputs) if n_inputs is not None else 0
+    n_outputs = obj.get("nOutputs", obj.get("publicOutputs", 0))
+    n_outputs = int(n_outputs) if n_outputs is not None else 0
+
     prime_raw = obj.get("prime")
     prime = int(prime_raw) if prime_raw is not None else BN254_PRIME
 
@@ -133,7 +143,8 @@ def load_r1cs_json(path: str | Path) -> R1CS:
                     max_var = t.var
         n_vars = max_var + 1
 
-    A, B, C = _build_sparse(constraints, n_rows=n_constraints, n_cols=n_vars)
+    # pass prime through
+    A, B, C = _build_sparse(constraints, n_rows=n_constraints, n_cols=n_vars, p=prime)
 
     return R1CS(
         A=A, B=B, C=C,
