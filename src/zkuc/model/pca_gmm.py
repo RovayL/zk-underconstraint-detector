@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import json
 import math
 import numpy as np
@@ -27,9 +27,18 @@ def _read_jsonl(jsonl_path: str) -> List[Dict[str,Any]]:
                 rows.append(json.loads(line))
     return rows
 
-def dataset_from_jsonl(jsonl_path: str, feature_keys: Optional[List[str]]=None) -> Tuple[np.ndarray, List[str], List[Optional[int]]]:
+def dataset_from_jsonl(
+    jsonl_path: str,
+    feature_keys: Optional[List[str]] = None,
+    return_ids: bool = False,
+    return_parents: bool = False,
+) -> Union[
+    Tuple[np.ndarray, List[str], List[Optional[int]]],
+    Tuple[np.ndarray, List[str], List[Optional[int]], List[str]],
+    Tuple[np.ndarray, List[str], List[Optional[int]], List[str], List[str]]
+]:
     rows = _read_jsonl(jsonl_path)
-    X_list, y_list = [], []
+    X_list, y_list, id_list, parent_list = [], [], [], []
     if feature_keys is None:
         feature_keys = NUMERIC_FEATURES_DEFAULT
     for r in rows:
@@ -42,8 +51,31 @@ def dataset_from_jsonl(jsonl_path: str, feature_keys: Optional[List[str]]=None) 
             x.append(float(v))
         X_list.append(x)
         y_list.append(r.get("label_uc", None))
+        # Optional bookkeeping for ablations/splits
+        rid = r.get("id")
+        if rid is None:
+            # fall back to circuit_id if present in features; else synthesize an index
+            rid = feats.get("circuit_id", f"row_{len(id_list)}")
+        id_list.append(str(rid))
+        # Prefer explicit parent_id from dataset; else guess a group from parent_id/circuit_id/id
+        pid = r.get("parent_id")
+        if pid is None:
+            # Heuristic: if id looks like "<base>.seed###.<rest>", group by the base before ".seed"
+            base = str(rid)
+            if ".seed" in base:
+                pid = base.split(".seed", 1)[0]
+            else:
+                # last resort: group by parent_id field if present in features or by rid itself
+                pid = feats.get("parent_id", base)
+        parent_list.append(str(pid))
     X = np.asarray(X_list, dtype=float)
-    return X, feature_keys, y_list
+    # return X, feature_keys, y_list
+    if return_ids and return_parents:
+        return X, feature_keys, y_list, id_list, parent_list
+    elif return_ids:
+        return X, feature_keys, y_list, id_list
+    else:
+        return X, feature_keys, y_list
 
 @dataclass
 class PCAGMMModel:

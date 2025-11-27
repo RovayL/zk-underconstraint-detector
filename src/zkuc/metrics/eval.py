@@ -5,6 +5,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, p
 from sklearn.calibration import calibration_curve
 import matplotlib.pyplot as plt
 from pathlib import Path
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 def tpr_at_fpr(y_true: np.ndarray, y_score: np.ndarray, target_fpr: float) -> float:
     fpr, tpr, thr = roc_curve(y_true, y_score)
@@ -80,3 +81,32 @@ def save_plots(y_true: np.ndarray, y_score: np.ndarray, out_dir: str):
     plt.tight_layout()
     plt.savefig(out / "calibration.png", dpi=150)
     plt.close()
+
+def eval_with_thresholds(y_true: np.ndarray, y_score: np.ndarray, thr: float) -> Dict[str, Any]:
+    yhat = (y_score >= thr).astype(int)
+    return {
+        "accuracy": float(accuracy_score(y_true, yhat)),
+        "precision": float(precision_score(y_true, yhat, zero_division=0)),
+        "recall": float(recall_score(y_true, yhat, zero_division=0)),
+        "f1": float(f1_score(y_true, yhat, zero_division=0)),
+    }
+
+def save_overlays(models_curves: Dict[str, Dict[str, np.ndarray]], out_dir: str):
+    """
+    models_curves: name -> {"fpr":..., "tpr":..., "rec":..., "prec":...}
+    """
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    # ROC
+    plt.figure()
+    for name, c in models_curves.items():
+        plt.plot(c["fpr"], c["tpr"], label=name)
+    plt.plot([0,1],[0,1], "--", alpha=0.5)
+    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate"); plt.title("ROC (overlay)")
+    plt.legend(); plt.tight_layout(); plt.savefig(out/"roc_overlay.png", dpi=150); plt.close()
+    # PR
+    plt.figure()
+    for name, c in models_curves.items():
+        plt.plot(c["rec"], c["prec"], label=name)
+    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("PR (overlay)")
+    plt.legend(); plt.tight_layout(); plt.savefig(out/"pr_overlay.png", dpi=150); plt.close()
+

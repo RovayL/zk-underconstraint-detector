@@ -2,6 +2,7 @@ import json, random
 import click
 import numpy as np
 from pathlib import Path
+import numpy as np
 # from .core.r1cs_io import load_r1cs_json, summarize_r1cs
 # from .features.structural import structural_features
 from zkuc.core.jacobian import matvec_rows_modp, jacobian_submatrix_dense_modp
@@ -327,6 +328,58 @@ def model_eval_cmd(jsonl_path, model_in, cal_in, report_out, plots_out, scores_o
             for rid, yy, s, bp, l in zip(ids_lab, y, proba, unsup["buggy_post"], unsup["llr"]):
                 w.writerow([rid, int(yy), float(s), float(bp), float(l)])
         click.echo(f"Saved scores to {scores_out}")
+
+@cli.command("ablate")
+@click.option("--jsonl", "jsonl_path", required=True)
+@click.option("--out-dir", default="reports/ablations", show_default=True)
+@click.option("--seed", default=0, show_default=True, type=int)
+def ablate_cmd(jsonl_path, out_dir, seed):
+    """
+    Run ablations & classical baselines; emit overlays + Markdown table.
+    Splits by parent_id groups to avoid leakage.
+    """
+    from zkuc.experiments.ablations import split_dataset, run_gmm_pipeline, run_supervised_baseline, write_table
+    from zkuc.metrics.eval import save_overlays
+    (Xtr,ytr,ids_tr), (Xte,yte,ids_te), feat_names = split_dataset(jsonl_path, test_size=0.3, seed=seed)
+    train = (Xtr,ytr,ids_tr); test = (Xte,yte,ids_te)
+
+    results = []
+    curves_all = {}
+    # 1) GMM+Cal (PCA) vs (raw); with and without probe features
+    for use_pca in [True, False]:
+        for drop_probe in [False, True]:
+            r = run_gmm_pipeline((train),(test), feat_names, use_pca=use_pca, n_pca=6, drop_probe=drop_probe)
+            results.append(r); curves_all.update(r["curves"])
+    # 2) Logistic-only baselines (raw/PCA; +/- probe)
+    for use_pca in [True, False]:
+        for drop_probe in [False, True]:
+            r = run_supervised_baseline((train),(test), feat_names, model_name="logreg",
+                                        use_pca=use_pca, n_pca=6, drop_probe=drop_probe)
+            results.append(r); curves_all.update(r["curves"])
+    # 3) Classical baselines: GNB, Linear SVM, RBF-SVM (PCA on)
+    for mdl in ["gnb","linsvm","rbfsvm"]:
+        r = run_supervised_baseline((train),(test), feat_names, model_name=mdl, use_pca=True, n_pca=6, drop_probe=False)
+        results.append(r); curves_all.update(r["curves"])
+
+    # Write overlays and table
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    save_overlays(curves_all, out_dir)
+    write_table(results, str(Path(out_dir)/"ablations.md"))
+    click.echo(f"Wrote overlays + table to {out_dir}")
+
+@cli.command("dataset-reprobe")
+@click.option("--r1cs-dir", required=True, help="Directory of base R1CS JSONs")
+@click.option("--out-jsonl", required=True)
+@click.option("--trials", default=10, show_default=True, type=int)
+@click.option("--subset", default=32, show_default=True, type=int)
+def dataset_reprobe_cmd(r1cs_dir, out_jsonl, trials, subset):
+    """
+    Recompute probe-time features for all R1CS in a directory, writing a fresh JSONL
+    so you can sweep trials/subset for robustness.
+    """
+    from zkuc.dataset.build import reprobe_directory  # small adapter you have in M3
+    reprobe_directory(r1cs_dir, out_jsonl, trials=trials, subset=subset)
+    click.echo(f"Wrote {out_jsonl} with trials={trials}, subset={subset}")
 
 
 def main():
