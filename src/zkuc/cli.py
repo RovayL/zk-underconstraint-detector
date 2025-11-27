@@ -1,4 +1,4 @@
-import json, random
+import json, random, tomllib
 import click
 import numpy as np
 from pathlib import Path
@@ -9,6 +9,7 @@ from zkuc.core.jacobian import matvec_rows_modp, jacobian_submatrix_dense_modp
 from zkuc.core.rank_modp import algebraic_rank_modp, structural_rank
 from zkuc.core.witness_io import load_witness_json, assemble_full_z
 from zkuc.core.r1cs_io import load_r1cs_json
+from zkuc.model.detector import ZKUCDetector
 
 @click.group()
 def cli():
@@ -536,6 +537,135 @@ def model_score_cmd(jsonl_path, model_in, cal_in, out_csv):
         for rid, yy, s in zip(ids, y_list, proba):
             w.writerow([rid, "" if yy is None else int(yy), float(s)])
     click.echo(f"Wrote scores to {out_csv}")
+
+# -------------------- M7 convenience commands --------------------
+def _load_config(path: str) -> dict:
+    p = Path(path)
+    if p.exists():
+        return tomllib.loads(p.read_text())
+    return {}
+
+def _cfg_val(cli_val, cfg: dict, section: str, key: str, fallback):
+    if cli_val is not None:
+        return cli_val
+    return cfg.get(section, {}).get(key, fallback)
+
+@cli.command("extract")
+@click.option("--r1cs", type=click.Path(exists=True), required=True)
+@click.option("--wtns", type=click.Path(exists=True), required=False, help="Optional witness JSON (not required)")
+@click.option("--out", type=click.Path(dir_okay=False), required=True)
+@click.option("--trials", default=None, type=int)
+@click.option("--subset", default=None, type=int)
+@click.option("--rank-mode", type=click.Choice(["algebraic","structural"]), default=None)
+@click.option("--seed", default=None, type=int)
+@click.option("--config", type=click.Path(exists=False), default="configs/default.toml", show_default=True)
+def extract_cmd(r1cs, wtns, out, trials, subset, rank_mode, seed, config):
+    """
+    Extract features from a single R1CS into a JSONL row.
+    """
+    import json, random
+    from zkuc.core.r1cs_io import load_r1cs_json
+    from zkuc.core.witness_io import load_witness_json
+    from zkuc.dataset.featurize import compute_all_features
+    cfg = _load_config(config)
+    trials = _cfg_val(trials, cfg, "probes", "trials", 10)
+    subset = _cfg_val(subset, cfg, "probes", "subset", 32)
+    rank_mode = _cfg_val(rank_mode, cfg, "probes", "rank_mode", "algebraic")
+    seed = _cfg_val(seed, cfg, "eval", "seed", 0)
+    R = load_r1cs_json(r1cs)
+    witness = load_witness_json(wtns, R.prime) if wtns else None
+    rng = random.Random(seed)
+    feats = compute_all_features(R, rng, {"trials":trials, "subset":subset, "rank_mode":rank_mode,
+                                          "freeze_const": True, "freeze_pub_inputs": True, "seed": seed})
+    feats["circuit_id"] = Path(r1cs).stem
+    row = {"id": Path(r1cs).name, "parent_id": None, "label_uc": None, "mutations": [], "features": feats}
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    click.echo(f"Appended features for {r1cs} -> {out}")
+
+
+@cli.command("fit")
+@click.option("--features", "jsonl_path", type=click.Path(exists=True), required=True)
+@click.option("--model", "model_out", type=click.Path(dir_okay=False), required=True)
+@click.option("--n-pca", default=None, type=int)
+@click.option("--cal-model", default=None, type=click.Choice(["logreg","tree"]))
+@click.option("--n-pca-feat", default=None, type=int)
+@click.option("--config", type=click.Path(exists=False), default="configs/default.toml", show_default=True)
+def fit_cmd(jsonl_path, model_out, n_pca, cal_model, n_pca_feat, config):
+    """
+    Fit the compact detector (unsupervised PCA+GMM + thin calibrator).
+    """
+    cfg = _load_config(config)
+    n_pca = _cfg_val(n_pca, cfg, "model", "n_pca", 6)
+    cal_model = _cfg_val(cal_model, cfg, "model", "cal_model", "logreg")
+    n_pca_feat = _cfg_val(n_pca_feat, cfg, "model", "n_pca_feat_for_cal", 3)
+    det = ZKUCDetector(n_pca=n_pca, cal_model=cal_model, n_pca_feat_for_cal=n_pca_feat)
+    det.fit_from_jsonl(jsonl_path).save(model_out)
+    click.echo(f"Saved detector to {model_out}")
+
+
+@cli.command("score-detector")
+@click.option("--features", "jsonl_path", type=click.Path(exists=True), required=True)
+@click.option("--model", "model_in", type=click.Path(exists=True), required=True)
+@click.option("--out", "out_csv", type=click.Path(dir_okay=False), required=True)
+@click.option("--config", type=click.Path(exists=False), default="configs/default.toml", show_default=True)
+def score_detector_cmd(jsonl_path, model_in, out_csv, config):
+    """
+    Score features with a saved detector (id, prob_buggy, llr, optional label).
+    """
+    import csv
+    _ = _load_config(config)  # reserved for future overrides
+    det = ZKUCDetector.load(model_in)
+    rows = det.score_jsonl(jsonl_path)
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["id","prob_buggy","llr","label"])
+        w.writeheader()
+        for r in rows:
+            w.writerow({
+                "id": r["id"],
+                "prob_buggy": r["prob_buggy"],
+                "llr": r["llr"],
+                "label": r.get("label",""),
+            })
+    click.echo(f"Wrote {out_csv}")
+
+
+@cli.command("eval-detector")
+@click.option("--features", "jsonl_path", type=click.Path(exists=True), required=True)
+@click.option("--model", "model_in", type=click.Path(exists=True), required=True)
+@click.option("--report-out", type=click.Path(dir_okay=False), default=None, show_default=True)
+@click.option("--plots-out", type=click.Path(dir_okay=True), default=None, show_default=True)
+@click.option("--config", type=click.Path(exists=False), default="configs/default.toml", show_default=True)
+def eval_detector_cmd(jsonl_path, model_in, report_out, plots_out, config):
+    """
+    Evaluate a saved detector on labeled rows in --features.
+    """
+    import json
+    import numpy as np
+    from sklearn.metrics import roc_curve, precision_recall_curve
+    from zkuc.model.pca_gmm import dataset_from_jsonl
+    from zkuc.metrics.eval import evaluate_scores, save_overlays
+
+    cfg = _load_config(config)
+    report_out = report_out or _cfg_val(None, cfg, "eval", "report_out", "reports/m7_eval.json")
+    plots_out = plots_out or _cfg_val(None, cfg, "eval", "plots_out", "reports/m7_plots")
+    det = ZKUCDetector.load(model_in)
+    X, feat_names, y_list = dataset_from_jsonl(jsonl_path, feature_keys=det.feature_keys)
+    mask = np.array([yy is not None for yy in y_list], dtype=bool)
+    if mask.sum() == 0:
+        raise click.ClickException("No labels available to evaluate.")
+    y_true = np.array([yy for yy in y_list if yy is not None], dtype=int)
+    proba, _ = det.predict(X[mask])
+    metrics = evaluate_scores(y_true, proba)
+    Path(report_out).parent.mkdir(parents=True, exist_ok=True)
+    with open(report_out, "w") as f:
+        json.dump(metrics, f, indent=2)
+    fpr, tpr, _ = roc_curve(y_true, proba)
+    rec, prec, _ = precision_recall_curve(y_true, proba)
+    save_overlays({"detector": {"fpr":fpr,"tpr":tpr,"rec":rec,"prec":prec}}, plots_out)
+    click.echo(f"Wrote {report_out} and plots to {plots_out}")
 
 
 @cli.command("import-noir")

@@ -106,8 +106,7 @@ def probe_stats(
         "trials": trials, "subset": k if unfrozen else 0, "rank_mode": rank_mode
     }
 
-def featurize_file(r1cs_path: str, rng: random.Random, probe_cfg: Dict[str,Any]) -> Dict[str,Any]:
-    R = load_r1cs_json(r1cs_path)
+def compute_all_features(R, rng: random.Random, probe_cfg: Dict[str,Any]) -> Dict[str,Any]:
     struct = structural_from_rows(R.A_rows, R.B_rows, R.C_rows, R.n_vars)
     cfg = dict(probe_cfg)
     rank_mode = cfg.pop("rank_mode", "algebraic")
@@ -122,3 +121,7 @@ def featurize_file(r1cs_path: str, rng: random.Random, probe_cfg: Dict[str,Any])
     }
     base.update(struct); base.update(probe)
     return base
+
+def featurize_file(r1cs_path: str, rng: random.Random, probe_cfg: Dict[str,Any]) -> Dict[str,Any]:
+    R = load_r1cs_json(r1cs_path)
+    return compute_all_features(R, rng, probe_cfg)

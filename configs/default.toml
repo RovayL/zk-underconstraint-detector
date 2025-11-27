@@ -1,0 +1,22 @@
+[features]
+numeric = [
+  "ratio_c_v","avg_fanin","avg_fanout","mult_share","dup_rows_frac",
+  "rank_mean","rank_std","nullity_mean","nullity_std",
+  "dead_rows_frac_mean","wiggle_rate_mean",
+  "n_constraints","n_vars","n_inputs","n_outputs"
+]
+
+[probes]
+trials = 10
+subset = 32
+rank_mode = "algebraic"   # or "structural"
+freeze_const = true
+freeze_pub_inputs = true
+
+[model]
+n_pca = 6
+cal_model = "logreg"
+n_pca_feat_for_cal = 3
+
+[eval]
+seed = 0
