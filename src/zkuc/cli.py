@@ -537,6 +537,19 @@ def model_score_cmd(jsonl_path, model_in, cal_in, out_csv):
             w.writerow([rid, "" if yy is None else int(yy), float(s)])
     click.echo(f"Wrote scores to {out_csv}")
 
+
+@cli.command("import-noir")
+@click.option("--in-json", required=True, type=click.Path(exists=True))
+@click.option("--out-r1cs", required=True, type=click.Path(dir_okay=False))
+def import_noir_cmd(in_json, out_r1cs):
+    """
+    Normalize a minimal Noir ACIR-style JSON (add/mul/const subset) into our R1CS JSON format.
+    """
+    from zkuc.integrations.noir_adapter import noir_json_to_r1cs
+    obj = noir_json_to_r1cs(in_json)
+    Path(out_r1cs).write_text(json.dumps(obj))
+    click.echo(f"Wrote {out_r1cs}")
+
 @cli.command("dataset-reprobe")
 @click.option("--r1cs-dir", required=True, help="Directory of base R1CS JSONs")
 @click.option("--out-jsonl", required=True)
