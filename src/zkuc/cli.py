@@ -184,7 +184,8 @@ def probe_cmd(r1cs, witness_files, witness_dir, trials, subset, seed,
 @click.option("--subset", default=32, show_default=True)
 @click.option("--freeze-const/--no-freeze-const", default=True, show_default=True)
 @click.option("--freeze-pub-inputs/--no-freeze-pub-inputs", default=True, show_default=True)
-def seed_dataset_cmd(src_glob, out_dir, per_src, seed, jsonl_path, trials, subset, freeze_const, freeze_pub_inputs):
+@click.option("--rank-mode", type=click.Choice(["algebraic","structural"]), default="algebraic", show_default=True)
+def seed_dataset_cmd(src_glob, out_dir, per_src, seed, jsonl_path, trials, subset, freeze_const, freeze_pub_inputs, rank_mode):
     """
     Generate UC/control seeds from originals and write a dataset JSONL with features + ground-truth labels.
     """
@@ -193,7 +194,8 @@ def seed_dataset_cmd(src_glob, out_dir, per_src, seed, jsonl_path, trials, subse
 
     rng = random.Random(seed)
     probe_cfg = dict(trials=int(trials), subset=int(subset),
-                     freeze_const=bool(freeze_const), freeze_pub_inputs=bool(freeze_pub_inputs), seed=int(seed))
+                     freeze_const=bool(freeze_const), freeze_pub_inputs=bool(freeze_pub_inputs),
+                     seed=int(seed), rank_mode=rank_mode)
 
     # Define mutation recipes (feel free to tweak)
     uc_specs = [
@@ -356,8 +358,8 @@ def ablate_cmd(jsonl_path, out_dir, seed):
             r = run_supervised_baseline((train),(test), feat_names, model_name="logreg",
                                         use_pca=use_pca, n_pca=6, drop_probe=drop_probe)
             results.append(r); curves_all.update(r["curves"])
-    # 3) Classical baselines: GNB, Linear SVM, RBF-SVM (PCA on)
-    for mdl in ["gnb","linsvm","rbfsvm"]:
+    # 3) Classical baselines: GNB, Linear SVM, RBF-SVM, AdaBoost (PCA on)
+    for mdl in ["gnb","linsvm","rbfsvm","ada"]:
         r = run_supervised_baseline((train),(test), feat_names, model_name=mdl, use_pca=True, n_pca=6, drop_probe=False)
         results.append(r); curves_all.update(r["curves"])
 
@@ -367,19 +369,127 @@ def ablate_cmd(jsonl_path, out_dir, seed):
     write_table(results, str(Path(out_dir)/"ablations.md"))
     click.echo(f"Wrote overlays + table to {out_dir}")
 
+
+@cli.command("family-holdout")
+@click.option("--jsonl", "jsonl_path", required=True)
+@click.option("--out-md", default="reports/family_holdout.md", show_default=True)
+@click.option("--use-pca/--no-pca", default=False, show_default=True)
+@click.option("--drop-probe/--keep-probe", default=False, show_default=True)
+def family_holdout_cmd(jsonl_path, out_md, use_pca, drop_probe):
+    """
+    Leave-one-family-out evaluation (train on all but one parent_id).
+    """
+    from zkuc.experiments.ablations import leave_family_out, write_family_table
+    rows = leave_family_out(jsonl_path, use_pca=use_pca, drop_probe=drop_probe)
+    write_family_table(rows, out_md, title="Family Hold-out (leave-one-parent)")
+    click.echo(f"Wrote family hold-out results to {out_md}")
+
+
+@cli.command("rank-ablate")
+@click.option("--modp-jsonl", required=True, help="Dataset featurized with mod-p rank")
+@click.option("--float-jsonl", required=True, help="Dataset featurized with float/SVD rank")
+@click.option("--out-md", default="reports/rank_ablation.md", show_default=True)
+@click.option("--use-pca/--no-pca", default=False, show_default=True)
+def rank_ablate_cmd(modp_jsonl, float_jsonl, out_md, use_pca):
+    """
+    Compare mod-p vs structural(float/SVD) rank features on matched splits.
+    """
+    from zkuc.experiments.ablations import rank_mode_compare, write_rank_table
+    rows = rank_mode_compare(modp_jsonl, float_jsonl, use_pca=use_pca, drop_probe=False)
+    write_rank_table(rows, out_md)
+    click.echo(f"Wrote rank-mode comparison to {out_md}")
+
+
+@cli.command("probe-sweep")
+@click.option("--r1cs-dir", required=True, help="Directory containing seeded *.r1cs.json files")
+@click.option("--trials", multiple=True, type=int, required=True, help="Probe counts to sweep, e.g., --trials 5 --trials 10")
+@click.option("--subset", default=32, show_default=True, type=int)
+@click.option("--rank-mode", type=click.Choice(["algebraic","structural"]), default="algebraic", show_default=True)
+@click.option("--out-dir", default="reports/probe_sweep", show_default=True)
+@click.option("--seed", default=0, show_default=True, type=int)
+def probe_sweep_cmd(r1cs_dir, trials, subset, rank_mode, out_dir, seed):
+    """
+    Re-probe a seedbank at different probe counts and plot TPR@1% vs probe count.
+    """
+    import json
+    import matplotlib.pyplot as plt
+    from zkuc.dataset.build import reprobe_directory
+    from zkuc.model.pca_gmm import dataset_from_jsonl
+    from zkuc.experiments.ablations import split_dataset, run_gmm_pipeline
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    for t in trials:
+        ds_path = out_dir / f"dataset_probes{t}_{rank_mode}.jsonl"
+        reprobe_directory(r1cs_dir, ds_path, trials=t, subset=subset, rank_mode=rank_mode, seed=seed)
+        train, test, feat_names = split_dataset(str(ds_path), seed=seed)
+        r = run_gmm_pipeline(train, test, feat_names, use_pca=False, n_pca=6, drop_probe=False)
+        metrics = r["metrics"]
+        # capture mean/std of probe feature dispersion for context
+        X, fnames, y_list = dataset_from_jsonl(str(ds_path))
+        rank_std_idx = fnames.index("rank_std") if "rank_std" in fnames else None
+        null_std_idx = fnames.index("nullity_std") if "nullity_std" in fnames else None
+        if rank_std_idx is not None:
+            rank_std_mean = float(np.mean(X[:, rank_std_idx]))
+        else:
+            rank_std_mean = 0.0
+        if null_std_idx is not None:
+            null_std_mean = float(np.mean(X[:, null_std_idx]))
+        else:
+            null_std_mean = 0.0
+        results.append({
+            "trials": t,
+            "auroc": metrics["auroc"],
+            "ap": metrics["average_precision"],
+            "tpr1": metrics["tpr_at_fpr_1pct"],
+            "rank_std_mean": rank_std_mean,
+            "null_std_mean": null_std_mean,
+        })
+    # sort by trials
+    results = sorted(results, key=lambda r: r["trials"])
+    # plots
+    plt.figure()
+    plt.plot([r["trials"] for r in results], [r["tpr1"] for r in results], marker="o", label="TPR@1% FP")
+    plt.plot([r["trials"] for r in results], [r["auroc"] for r in results], marker="s", label="AUROC")
+    plt.xlabel("# probes (trials)")
+    plt.ylabel("Score")
+    plt.title(f"Probe budget sweep ({rank_mode})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / f"probe_sweep_{rank_mode}.png", dpi=150)
+    plt.close()
+    # markdown summary
+    md_path = out_dir / f"probe_sweep_{rank_mode}.md"
+    header = "| trials | AUROC | AP | TPR@1% | rank_std_mean | nullity_std_mean |\n"
+    header += "|---|---|---|---|---|---|\n"
+    lines = [header]
+    for r in results:
+        lines.append(f"| {r['trials']} | {r['auroc']:.3f} | {r['ap']:.3f} | {r['tpr1']:.3f} | {r['rank_std_mean']:.3f} | {r['null_std_mean']:.3f} |\n")
+    md_path.write_text("# Probe count sweep\n\n" + "".join(lines))
+    click.echo(f"Wrote probe sweep results to {md_path}")
+
 @cli.command("dataset-reprobe")
 @click.option("--r1cs-dir", required=True, help="Directory of base R1CS JSONs")
 @click.option("--out-jsonl", required=True)
 @click.option("--trials", default=10, show_default=True, type=int)
 @click.option("--subset", default=32, show_default=True, type=int)
-def dataset_reprobe_cmd(r1cs_dir, out_jsonl, trials, subset):
+@click.option("--rank-mode", type=click.Choice(["algebraic","structural"]), default="algebraic", show_default=True)
+@click.option("--freeze-const/--no-freeze-const", default=True, show_default=True)
+@click.option("--freeze-pub-inputs/--no-freeze-pub-inputs", default=True, show_default=True)
+@click.option("--seed", default=0, show_default=True, type=int)
+def dataset_reprobe_cmd(r1cs_dir, out_jsonl, trials, subset, rank_mode, freeze_const, freeze_pub_inputs, seed):
     """
     Recompute probe-time features for all R1CS in a directory, writing a fresh JSONL
     so you can sweep trials/subset for robustness.
     """
-    from zkuc.dataset.build import reprobe_directory  # small adapter you have in M3
-    reprobe_directory(r1cs_dir, out_jsonl, trials=trials, subset=subset)
-    click.echo(f"Wrote {out_jsonl} with trials={trials}, subset={subset}")
+    from zkuc.dataset.build import reprobe_directory
+    reprobe_directory(
+        r1cs_dir, out_jsonl, trials=trials, subset=subset,
+        freeze_const=freeze_const, freeze_pub_inputs=freeze_pub_inputs,
+        rank_mode=rank_mode, seed=seed
+    )
+    click.echo(f"Wrote {out_jsonl} with trials={trials}, subset={subset}, rank_mode={rank_mode}")
 
 
 def main():

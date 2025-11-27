@@ -8,6 +8,8 @@ from sklearn.decomposition import PCA
 from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC, SVC
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.tree import DecisionTreeClassifier
 
 @dataclass
 class Featurizer:
@@ -40,3 +42,11 @@ def linear_svm():
 def rbf_svm():
     # probability=True enables calibrated probabilities (Platt)
     return SVC(kernel="rbf", probability=True, class_weight="balanced")
+
+def adaboost():
+    # shallow stumps keep it comparable to other lightweight baselines
+    return AdaBoostClassifier(
+        estimator=DecisionTreeClassifier(max_depth=1),
+        n_estimators=200,
+        learning_rate=0.5,
+    )

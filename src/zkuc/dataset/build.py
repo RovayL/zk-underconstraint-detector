@@ -73,3 +73,40 @@ def seed_from_file(
     with open(jsonl_path, "a") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
+
+def reprobe_directory(
+    r1cs_dir: str,
+    out_jsonl: str,
+    trials: int = 10,
+    subset: int = 32,
+    freeze_const: bool = True,
+    freeze_pub_inputs: bool = True,
+    rank_mode: str = "algebraic",
+    seed: int = 0,
+):
+    """
+    Recompute probe features for all *.r1cs.json files in a directory.
+    Label is inferred from filename (.uc. -> 1, .ctrl. -> 0, else None).
+    """
+    rng = random.Random(seed)
+    probe_cfg = dict(trials=int(trials), subset=int(subset),
+                     freeze_const=bool(freeze_const), freeze_pub_inputs=bool(freeze_pub_inputs),
+                     seed=int(seed), rank_mode=rank_mode)
+    rows = []
+    for fp in sorted(Path(r1cs_dir).glob("*.r1cs.json")):
+        feats = featurize_file(str(fp), rng, probe_cfg)
+        name = fp.name
+        label = 1 if ".uc." in name else 0 if ".ctrl." in name else None
+        parent = name.split(".seed",1)[0] + ".r1cs.json" if ".seed" in name else fp.name
+        rows.append({
+            "id": name,
+            "parent_id": parent,
+            "label_uc": label,
+            "mutations": [],
+            "features": feats,
+            "probe_cfg": probe_cfg
+        })
+    Path(out_jsonl).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_jsonl, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")

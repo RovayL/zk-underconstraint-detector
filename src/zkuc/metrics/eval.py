@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any, Tuple, Callable
 import numpy as np
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
+from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve, brier_score_loss
 from sklearn.calibration import calibration_curve
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -40,6 +40,7 @@ def evaluate_scores(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, Any]:
         "tpr_at_fpr_1pct": float(tpr1),
         "tpr_at_fpr_5pct": float(tpr5),
         "calibration_curve": {"prob_true": prob_true.tolist(), "prob_pred": prob_pred.tolist()},
+        "brier": float(brier_score_loss(y_true, y_score)),
     }
 
 def save_plots(y_true: np.ndarray, y_score: np.ndarray, out_dir: str):
@@ -109,4 +110,3 @@ def save_overlays(models_curves: Dict[str, Dict[str, np.ndarray]], out_dir: str)
         plt.plot(c["rec"], c["prec"], label=name)
     plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("PR (overlay)")
     plt.legend(); plt.tight_layout(); plt.savefig(out/"pr_overlay.png", dpi=150); plt.close()
-

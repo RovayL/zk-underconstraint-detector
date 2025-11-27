@@ -7,7 +7,7 @@ import numpy as np
 from zkuc.core.r1cs_io import load_r1cs_json
 from zkuc.core.witness_io import assemble_full_z
 from zkuc.core.jacobian import matvec_rows_modp, jacobian_submatrix_dense_modp
-from zkuc.core.rank_modp import algebraic_rank_modp
+from zkuc.core.rank_modp import algebraic_rank_modp, structural_rank
 
 # ---- structural features from row support only ----
 def structural_from_rows(A_rows, B_rows, C_rows, n_vars: int) -> Dict[str, Any]:
@@ -47,7 +47,8 @@ def structural_from_rows(A_rows, B_rows, C_rows, n_vars: int) -> Dict[str, Any]:
 # ---- probe-time stats without requiring a satisfying witness ----
 def probe_stats(
     R, rng: random.Random, trials: int = 10, subset: int = 32,
-    freeze_const: bool = True, freeze_pub_inputs: bool = True, seed: int = 0
+    freeze_const: bool = True, freeze_pub_inputs: bool = True, seed: int = 0,
+    rank_mode: str = "algebraic",
 ) -> Dict[str, Any]:
     p = R.prime
     # freeze policy
@@ -77,7 +78,11 @@ def probe_stats(
         k = min(subset, len(unfrozen))
         cols = sorted(rng.sample(unfrozen, k)) if k > 0 else []
         J = jacobian_submatrix_dense_modp(R.A_rows, R.B_rows, R.C_rows, Az, Bz, cols, p)
-        r = algebraic_rank_modp(J, p)
+        if rank_mode == "algebraic":
+            r = algebraic_rank_modp(J, p)
+        else:
+            # structural_rank over reals is the float/SVD control
+            r = structural_rank(J, 2)
         ranks.append(r)
         nulls.append(max(J.shape[1] - r, 0))
         # dead rows & wiggle proxy
@@ -98,13 +103,15 @@ def probe_stats(
         "nullity_mean": nm, "nullity_std": ns,
         "dead_rows_frac_mean": dm,
         "wiggle_rate_mean": wm,
-        "trials": trials, "subset": k if unfrozen else 0
+        "trials": trials, "subset": k if unfrozen else 0, "rank_mode": rank_mode
     }
 
 def featurize_file(r1cs_path: str, rng: random.Random, probe_cfg: Dict[str,Any]) -> Dict[str,Any]:
     R = load_r1cs_json(r1cs_path)
     struct = structural_from_rows(R.A_rows, R.B_rows, R.C_rows, R.n_vars)
-    probe = probe_stats(R, rng, **probe_cfg)
+    cfg = dict(probe_cfg)
+    rank_mode = cfg.pop("rank_mode", "algebraic")
+    probe = probe_stats(R, rng, rank_mode=rank_mode, **cfg)
     base = {
         "circuit_id": Path(r1cs_path).stem,
         "n_constraints": int(R.n_constraints),

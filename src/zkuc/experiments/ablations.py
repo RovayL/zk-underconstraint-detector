@@ -10,11 +10,11 @@ from sklearn.metrics import roc_curve, precision_recall_curve, roc_auc_score, av
 
 from zkuc.model.pca_gmm import dataset_from_jsonl, fit_pca_gmm
 from zkuc.model.calibrate import fit_calibrator
-from zkuc.model.baselines import Featurizer, gaussian_nb, logreg, linear_svm, rbf_svm
+from zkuc.model.baselines import Featurizer, gaussian_nb, logreg, linear_svm, rbf_svm, adaboost
 from zkuc.metrics.eval import evaluate_scores, eval_with_thresholds, save_overlays
 
 ARROWS = {"auroc":"↑","average_precision":"↑","tpr_at_fpr_1pct":"↑","tpr_at_fpr_5pct":"↑",
-          "accuracy":"↑","precision":"↑","recall":"↑","f1":"↑"}
+          "accuracy":"↑","precision":"↑","recall":"↑","f1":"↑","brier":"↓"}
 
 # ----- feature masks ----------------------------------------------------------
 PROBE_KEYS = {"rank_mean","rank_std","nullity_mean","nullity_std",
@@ -80,6 +80,7 @@ def run_supervised_baseline(train, test, feat_names, model_name:str, use_pca=Tru
     elif model_name=="logreg": clf = logreg()
     elif model_name=="linsvm": clf = linear_svm()
     elif model_name=="rbfsvm": clf = rbf_svm()
+    elif model_name=="ada": clf = adaboost()
     else: raise ValueError(model_name)
 
     clf.fit(Ztr, ytr)
@@ -105,7 +106,7 @@ def run_supervised_baseline(train, test, feat_names, model_name:str, use_pca=Tru
 
 def write_table(rows: List[Dict[str,Any]], out_md: str):
     from tabulate import tabulate
-    cols = ["Model","AUROC","AP","TPR@1%","TPR@5%","Acc","Prec","Recall","F1"]
+    cols = ["Model","AUROC","AP","TPR@1%","TPR@5%","Acc","Prec","Recall","F1","Brier"]
     table = []
     for r in rows:
         m = r["metrics"]
@@ -115,7 +116,77 @@ def write_table(rows: List[Dict[str,Any]], out_md: str):
             f"{m['tpr_at_fpr_1pct']:.3f} ↑", f"{m['tpr_at_fpr_5pct']:.3f} ↑",
             f"{m['accuracy']:.3f} ↑", f"{m['precision']:.3f} ↑",
             f"{m['recall']:.3f} ↑", f"{m['f1']:.3f} ↑",
+            f"{m['brier']:.3f} ↓",
         ])
     md = tabulate(table, headers=cols, tablefmt="github")
     Path(out_md).parent.mkdir(parents=True, exist_ok=True)
     Path(out_md).write_text("# Ablations & Robustness\n\n" + md + "\n")
+
+
+def leave_family_out(jsonl_path: str, use_pca: bool=True, n_pca: int=6, drop_probe: bool=False):
+    """
+    Train on all families except one and test on the held-out family.
+    Returns list of dicts with metrics per family.
+    """
+    X, feat_names, y_list, ids, parents = dataset_from_jsonl(jsonl_path, return_ids=True, return_parents=True)
+    mask = np.array([yy is not None for yy in y_list])
+    X, y = X[mask], np.array([yy for yy in y_list if yy is not None], dtype=int)
+    ids = [ids[i] for i,m in enumerate(mask) if m]
+    parents = np.array([parents[i] for i,m in enumerate(mask) if m])
+
+    families = sorted(set(parents))
+    results = []
+    for fam in families:
+        te_mask = parents == fam
+        tr_mask = ~te_mask
+        train = (X[tr_mask], y[tr_mask], [ids[i] for i,m in enumerate(tr_mask) if m])
+        test  = (X[te_mask], y[te_mask], [ids[i] for i,m in enumerate(te_mask) if m])
+        r = run_gmm_pipeline(train, test, feat_names, use_pca=use_pca, n_pca=n_pca, drop_probe=drop_probe)
+        r["family"] = fam
+        results.append(r)
+    return results
+
+
+def write_family_table(rows: List[Dict[str,Any]], out_md: str, title: str="Family Hold-out (LOFO)"):
+    from tabulate import tabulate
+    cols = ["Family","AUROC","AP","TPR@1%","TPR@5%"]
+    table = []
+    for r in rows:
+        m = r["metrics"]
+        table.append([
+            r.get("family",""),
+            f"{m['auroc']:.3f} ↑", f"{m['average_precision']:.3f} ↑",
+            f"{m['tpr_at_fpr_1pct']:.3f} ↑", f"{m['tpr_at_fpr_5pct']:.3f} ↑",
+        ])
+    md = tabulate(table, headers=cols, tablefmt="github")
+    Path(out_md).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_md).write_text(f"# {title}\n\n" + md + "\n")
+
+
+def rank_mode_compare(jsonl_modp: str, jsonl_struct: str, seed: int=0, use_pca: bool=False, drop_probe: bool=False) -> List[Dict[str,Any]]:
+    """
+    Compare mod-p vs structural(float/SVD) rank features on otherwise identical splits.
+    """
+    rows = []
+    for tag, path in [("mod-p", jsonl_modp), ("float-SVD", jsonl_struct)]:
+        train, test, feat_names = split_dataset(path, test_size=0.3, seed=seed)
+        r = run_gmm_pipeline(train, test, feat_names, use_pca=use_pca, n_pca=6, drop_probe=drop_probe)
+        r["rank_mode"] = tag
+        rows.append(r)
+    return rows
+
+
+def write_rank_table(rows: List[Dict[str,Any]], out_md: str):
+    from tabulate import tabulate
+    cols = ["Rank mode","AUROC","AP","TPR@1%","TPR@5%"]
+    table = []
+    for r in rows:
+        m = r["metrics"]
+        table.append([
+            r.get("rank_mode",""),
+            f"{m['auroc']:.3f} ↑", f"{m['average_precision']:.3f} ↑",
+            f"{m['tpr_at_fpr_1pct']:.3f} ↑", f"{m['tpr_at_fpr_5pct']:.3f} ↑",
+        ])
+    md = tabulate(table, headers=cols, tablefmt="github")
+    Path(out_md).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_md).write_text("# Rank-mode ablation\n\n" + md + "\n")
