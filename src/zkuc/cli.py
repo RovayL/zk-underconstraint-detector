@@ -469,6 +469,74 @@ def probe_sweep_cmd(r1cs_dir, trials, subset, rank_mode, out_dir, seed):
     md_path.write_text("# Probe count sweep\n\n" + "".join(lines))
     click.echo(f"Wrote probe sweep results to {md_path}")
 
+
+@cli.command("robustness-ci")
+@click.option("--jsonl", "jsonl_path", required=True)
+@click.option("--seeds", default="0,1,2,3,4,5,6,7,8,9", show_default=True, help="Comma-separated seeds for splits")
+@click.option("--models", default="gmm,logreg,ada", show_default=True, help="Comma-separated models from {gmm,logreg,ada}")
+@click.option("--out-md", default="reports/robustness_ci.md", show_default=True)
+def robustness_ci_cmd(jsonl_path, seeds, models, out_md):
+    """
+    Run repeated group-aware splits and report mean±CI for key metrics.
+    """
+    from zkuc.experiments.ablations import robustness_runs, write_robustness_table
+    seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
+    model_list = [m.strip() for m in models.split(",") if m.strip()]
+    rows = robustness_runs(jsonl_path, seed_list, model_list)
+    write_robustness_table(rows, out_md)
+    click.echo(f"Wrote robustness CI table to {out_md}")
+
+
+@cli.command("import-gnark")
+@click.option("--in-json", required=True, type=click.Path(exists=True))
+@click.option("--out-r1cs", required=True, type=click.Path(dir_okay=False))
+def import_gnark_cmd(in_json, out_r1cs):
+    """
+    Normalize a gnark-exported constraint JSON into our R1CS JSON format.
+    """
+    from zkuc.integrations.gnark_adapter import gnark_json_to_r1cs
+    obj = gnark_json_to_r1cs(in_json)
+    Path(out_r1cs).write_text(json.dumps(obj))
+    click.echo(f"Wrote {out_r1cs}")
+
+
+@cli.command("circomspect-compare")
+@click.option("--jsonl", "jsonl_path", required=True)
+@click.option("--spect", "spect_json", required=True)
+@click.option("--out-csv", default="reports/circomspect_compare.csv", show_default=True)
+def circomspect_compare_cmd(jsonl_path, spect_json, out_csv):
+    """
+    Join zkuc dataset rows with circomspect rule flags for side-by-side comparison.
+    """
+    from zkuc.integrations.circomspect_adapter import merge_circomspect
+    merge_circomspect(jsonl_path, spect_json, out_csv)
+    click.echo(f"Wrote {out_csv}")
+
+
+@cli.command("model-score")
+@click.option("--jsonl", "jsonl_path", required=True, help="Dataset JSONL (labels optional)")
+@click.option("--model-in", default="models/pca_gmm.joblib", show_default=True)
+@click.option("--cal-in", default="models/calibrator.joblib", show_default=True)
+@click.option("--out-csv", default="reports/scores.csv", show_default=True)
+def model_score_cmd(jsonl_path, model_in, cal_in, out_csv):
+    """
+    Score any dataset (with or without labels) using an existing PCA+GMM model and calibrator.
+    """
+    import csv
+    from zkuc.model.pca_gmm import dataset_from_jsonl, PCAGMMModel
+    from zkuc.model.calibrate import Calibrator
+    X, feat_names, y_list, ids = dataset_from_jsonl(jsonl_path, return_ids=True)
+    pga = PCAGMMModel.load(model_in)
+    cal = Calibrator.load(cal_in)
+    proba = cal.predict_proba(pga, X)
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id","label","score"])
+        for rid, yy, s in zip(ids, y_list, proba):
+            w.writerow([rid, "" if yy is None else int(yy), float(s)])
+    click.echo(f"Wrote scores to {out_csv}")
+
 @cli.command("dataset-reprobe")
 @click.option("--r1cs-dir", required=True, help="Directory of base R1CS JSONs")
 @click.option("--out-jsonl", required=True)

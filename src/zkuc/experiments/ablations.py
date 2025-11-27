@@ -46,7 +46,7 @@ def select_features(X: np.ndarray, feat_names: List[str], drop_probe: bool=False
         keep.append(i)
     return X[:, keep], [feat_names[i] for i in keep]
 
-def run_gmm_pipeline(train, test, feat_names, use_pca=True, n_pca=6, drop_probe=False) -> Dict[str,Any]:
+def run_gmm_pipeline(train, test, feat_names, use_pca=True, n_pca=6, drop_probe=False, calibrator_type: str="logreg") -> Dict[str,Any]:
     (Xtr,ytr,_), (Xte,yte,_) = train, test
     Xtr2, names_tr = select_features(Xtr, feat_names, drop_probe=drop_probe)
     Xte2, _        = select_features(Xte, feat_names, drop_probe=drop_probe)
@@ -54,7 +54,7 @@ def run_gmm_pipeline(train, test, feat_names, use_pca=True, n_pca=6, drop_probe=
     # unsupervised + calibrator
     n_pca_eff = n_pca if use_pca else Xtr2.shape[1]  # raw space uses full dimension
     pga = fit_pca_gmm(Xtr2, names_tr, n_pca=n_pca_eff, random_state=0)
-    cal = fit_calibrator(pga, Xtr2, ytr, n_pca_used=min(3, pga.n_pca), model_type="logreg", random_state=0)
+    cal = fit_calibrator(pga, Xtr2, ytr, n_pca_used=min(3, pga.n_pca), model_type=calibrator_type, random_state=0)
     proba = cal.predict_proba(pga, Xte2)
     curves = {}
     fpr, tpr, _ = roc_curve(yte, proba)
@@ -190,3 +190,60 @@ def write_rank_table(rows: List[Dict[str,Any]], out_md: str):
     md = tabulate(table, headers=cols, tablefmt="github")
     Path(out_md).parent.mkdir(parents=True, exist_ok=True)
     Path(out_md).write_text("# Rank-mode ablation\n\n" + md + "\n")
+
+
+def mean_ci(xs: List[float]) -> Tuple[float,float,float]:
+    arr = np.asarray(xs, dtype=float)
+    m = float(arr.mean())
+    s = float(arr.std(ddof=1)) if arr.size > 1 else 0.0
+    ci = 1.96 * s / math.sqrt(len(arr)) if len(arr) > 1 else 0.0
+    return m, m - ci, m + ci
+
+
+def robustness_runs(jsonl_path: str, seeds: List[int], models: List[str]) -> List[Dict[str,Any]]:
+    """
+    Run multiple group-aware splits and report mean/CI for each metric.
+    models: subset of {"gmm","logreg","ada"}
+    """
+    out = []
+    for model in models:
+        metrics_list = []
+        for seed in seeds:
+            train, test, feat_names = split_dataset(jsonl_path, test_size=0.3, seed=seed)
+            if model == "gmm":
+                r = run_gmm_pipeline(train, test, feat_names, use_pca=False, drop_probe=False, calibrator_type="logreg")
+            elif model == "logreg":
+                r = run_supervised_baseline(train, test, feat_names, model_name="logreg", use_pca=False, drop_probe=False)
+            elif model == "ada":
+                r = run_supervised_baseline(train, test, feat_names, model_name="ada", use_pca=True, drop_probe=False)
+            else:
+                continue
+            metrics_list.append(r["metrics"])
+        if not metrics_list:
+            continue
+        def agg(key):
+            vals = [m[key] for m in metrics_list]
+            return mean_ci(vals)
+        out.append({
+            "model": model,
+            "auroc": agg("auroc"),
+            "ap": agg("average_precision"),
+            "tpr1": agg("tpr_at_fpr_1pct"),
+            "brier": agg("brier"),
+        })
+    return out
+
+
+def write_robustness_table(rows: List[Dict[str,Any]], out_md: str):
+    header = "| Model | AUROC mean [CI] | AP mean [CI] | TPR@1% mean [CI] | Brier mean [CI] |\n"
+    header += "|---|---|---|---|---|\n"
+    lines = [header]
+    for r in rows:
+        def fmt(t):
+            m, lo, hi = t
+            return f"{m:.3f} [{lo:.3f},{hi:.3f}]"
+        lines.append(
+            f"| {r['model']} | {fmt(r['auroc'])} | {fmt(r['ap'])} | {fmt(r['tpr1'])} | {fmt(r['brier'])} |\n"
+        )
+    Path(out_md).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_md).write_text("# Robustness (multi-split)\n\n" + "".join(lines))

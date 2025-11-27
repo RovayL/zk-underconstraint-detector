@@ -7,6 +7,7 @@ import io
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import roc_curve
+from sklearn.isotonic import IsotonicRegression
 
 from .pca_gmm import PCAGMMModel
 
@@ -32,18 +33,18 @@ class Calibrator:
         # reconstruct classifier and features
         # load classifier from in-memory bytes
         obj = load(io.BytesIO(self.clf_bytes))
-        Z = pga.transform(X)
         scores = pga.score(X)
-        # build supervised feature vector: [buggy_post, llr, Z[:,:n]]
+        if self.model_type == "isotonic":
+            p = obj.predict(scores["buggy_post"])
+            return np.clip(p, 0.0, 1.0)
+        Z = pga.transform(X)
         n = self.n_pca_used
         F = np.concatenate([scores["buggy_post"].reshape(-1,1),
                             scores["llr"].reshape(-1,1),
                             Z[:, :n]], axis=1)
-        # return probability of UC=1
         if hasattr(obj, "predict_proba"):
             return obj.predict_proba(F)[:,1]
         else:
-            # DecisionTree might not have calibrate; use 0/1
             return obj.predict(F).astype(float)
 
 def _choose_threshold_at_fpr(y_true: np.ndarray, y_score: np.ndarray, target_fpr: float) -> float:
@@ -68,8 +69,26 @@ def fit_calibrator(
     random_state: int = 0
 ) -> Calibrator:
     # Build supervised feature table from unsupervised outputs
-    Z = pga.transform(X)
     scores = pga.score(X)
+    if model_type == "isotonic":
+        # 1D isotonic on buggy_post
+        feats = scores["buggy_post"]
+        iso = IsotonicRegression(out_of_bounds="clip")
+        iso.fit(feats, y)
+        prob = iso.predict(feats)
+        thr1 = _choose_threshold_at_fpr(y, prob, 0.01)
+        thr5 = _choose_threshold_at_fpr(y, prob, 0.05)
+        buf = io.BytesIO(); dump(iso, buf); clf_bytes = buf.getvalue()
+        return Calibrator(
+            model_type=model_type,
+            feature_mode="buggy_post_only",
+            n_pca_used=0,
+            threshold_fpr_1pct=float(thr1),
+            threshold_fpr_5pct=float(thr5),
+            clf_bytes=clf_bytes,
+        )
+
+    Z = pga.transform(X)
     n = min(n_pca_used, Z.shape[1])
     F = np.concatenate([scores["buggy_post"].reshape(-1,1),
                         scores["llr"].reshape(-1,1),

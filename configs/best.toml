@@ -1,0 +1,16 @@
+# Compact default configuration (phase M5)
+[model]
+type = "gmm_cal"
+use_pca = false
+n_pca = 6
+calibrator = "logreg"
+
+[features]
+drop_probe = false
+
+[probes]
+trials = 10
+subset = 32
+rank_mode = "algebraic"
+freeze_const = true
+freeze_pub_inputs = true
